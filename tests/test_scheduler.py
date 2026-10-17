@@ -369,6 +369,12 @@ def test_schedulers_workspace_renders_without_running_background_jobs(
         "enqueue_due",
         lambda scheduler: due_calls.append(True) or 2,
     )
+    manual_calls: list[str] = []
+    monkeypatch.setattr(
+        LocalScheduler,
+        "enqueue_manual",
+        lambda scheduler, job_id: manual_calls.append(job_id) or "manual-occurrence",
+    )
 
     app = AppTest.from_file(str(app_path), default_timeout=10).run()
     assert not app.exception
@@ -379,7 +385,14 @@ def test_schedulers_workspace_renders_without_running_background_jobs(
     assert any("Corporate-action refresh" in element.value for element in app.markdown)
     button_keys = {element.key for element in app.button}
     assert "run_all_due_jobs" in button_keys
-    assert not any(str(key).startswith("run_job_") for key in button_keys)
+    assert "run_job_corporate_action_refresh" in button_keys
+    assert "run_job_price_refresh" in button_keys
+    app.button(key="run_job_corporate_action_refresh").click().run()
+
+    assert not app.exception
+    assert manual_calls == ["corporate_action_refresh"]
+    assert any("Corporate-action refresh queued." in element.value for element in app.success)
+
     app.button(key="run_all_due_jobs").click().run()
 
     assert not app.exception

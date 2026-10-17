@@ -326,9 +326,10 @@ def show_schedulers(scheduler: LocalScheduler) -> None:
         else:
             st.info("No scheduled jobs are due.")
 
+    manually_queued_job: str | None = None
     for schedule in schedules:
         job_id = str(schedule["job_id"])
-        left, middle, right = st.columns([3, 2, 2])
+        left, middle, enabled_column, run_column = st.columns([3, 2, 1, 1])
         left.markdown(f"**{schedule['name']}**")
         left.caption(schedule["description"])
         middle.caption(
@@ -339,7 +340,7 @@ def show_schedulers(scheduler: LocalScheduler) -> None:
             ZoneInfo(str(schedule["timezone"]))
         )
         middle.caption(f"Next due: {next_due:%Y-%m-%d %H:%M %Z}")
-        enabled = right.checkbox(
+        enabled = enabled_column.checkbox(
             "Enabled",
             value=bool(schedule["enabled"]),
             key=f"scheduler_enabled_{job_id}",
@@ -347,6 +348,17 @@ def show_schedulers(scheduler: LocalScheduler) -> None:
         if enabled != bool(schedule["enabled"]):
             scheduler.set_enabled(job_id, enabled)
             st.rerun()
+        if run_column.button(
+            "Run",
+            key=f"run_job_{job_id}",
+            icon=":material/play_arrow:",
+            help=f"Queue only {schedule['name']} now without changing its schedule.",
+        ):
+            scheduler.enqueue_manual(job_id)
+            manually_queued_job = str(schedule["name"])
+
+    if manually_queued_job:
+        st.success(f"{manually_queued_job} queued.")
 
     st.caption(
         "Corporate-action refresh stages review candidates; it never approves actions."

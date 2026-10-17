@@ -81,10 +81,11 @@ The app's **Schedulers** workspace stores schedule definitions and run history
 in `data/catalog.sqlite`. While the app process is open, a background runner
 checks weekday schedules in Asia/Kolkata time: corporate actions at 18:30 and
 daily prices at 18:40. When the app starts, missed weekday occurrences are
-coalesced into one current run for each job. A single **Run all due jobs**
-button beside the scheduled-job list queues every enabled job that is due now.
-The app must remain open for clock-based runs; due work is checked again the
-next time it starts.
+coalesced into one current run for each job. Each schedule has a **Run** button
+to queue only that job immediately, without changing its enabled state. The
+single **Run all due jobs** button beside the scheduled-job list queues every
+enabled job that is due now. The app must remain open for clock-based runs; due
+work is checked again the next time it starts.
 
 Operational cadence, run time, timezone, and catch-up policy are in
 `configs/schedules.toml`. Edit that file and restart the app to apply schedule
