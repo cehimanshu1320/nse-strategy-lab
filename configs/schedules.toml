@@ -1,0 +1,22 @@
+# Scheduling configuration is operational policy. Job behavior lives in the
+# application services and is registered separately by stable job ID.
+
+[[jobs]]
+id = "corporate_action_refresh"
+name = "Corporate-action refresh"
+description = "Download the rolling NSE export and stage candidates for review."
+timezone = "Asia/Kolkata"
+cadence = "weekdays"
+hour = 18
+minute = 30
+catch_up = "coalesce_to_latest_export"
+
+[[jobs]]
+id = "price_refresh"
+name = "Daily price refresh"
+description = "Import missing bhavcopy sessions since the last accepted date."
+timezone = "Asia/Kolkata"
+cadence = "weekdays"
+hour = 18
+minute = 40
+catch_up = "import_missing_sessions"

@@ -1,0 +1,1 @@
+"""NSE-specific source adapters."""
