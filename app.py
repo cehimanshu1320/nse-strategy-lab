@@ -307,7 +307,25 @@ def show_schedulers(scheduler: LocalScheduler) -> None:
     )
 
     schedules = scheduler.schedules()
-    st.subheader("Scheduled jobs")
+    with st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="distribute",
+    ):
+        st.subheader("Scheduled jobs")
+        run_due_jobs = st.button(
+            "Run all due jobs",
+            key="run_all_due_jobs",
+            icon=":material/playlist_play:",
+            help="Queue every enabled schedule that is due now.",
+        )
+    if run_due_jobs:
+        count = scheduler.enqueue_due()
+        if count:
+            st.success(f"Queued {count} due job(s).")
+        else:
+            st.info("No scheduled jobs are due.")
+
     for schedule in schedules:
         job_id = str(schedule["job_id"])
         left, middle, right = st.columns([3, 2, 2])
@@ -330,31 +348,9 @@ def show_schedulers(scheduler: LocalScheduler) -> None:
             scheduler.set_enabled(job_id, enabled)
             st.rerun()
 
-    st.subheader("Run controls")
     st.caption(
-        "A manual run uses the same job service as a scheduled run. Corporate-action "
-        "refresh stages review candidates; it never approves actions."
+        "Corporate-action refresh stages review candidates; it never approves actions."
     )
-    control_columns = st.columns(len(schedules) + 1)
-    for column, schedule in zip(control_columns, schedules):
-        job_id = str(schedule["job_id"])
-        if column.button(
-            f"Run {str(schedule['name']).lower()} now",
-            key=f"run_job_{job_id}",
-            icon=":material/play_arrow:",
-        ):
-            scheduler.enqueue_manual(job_id)
-            st.success(f"{schedule['name']} queued.")
-    if control_columns[-1].button(
-        "Run all due jobs",
-        key="run_all_due_jobs",
-        icon=":material/playlist_play:",
-    ):
-        count = scheduler.enqueue_due()
-        if count:
-            st.success(f"Queued {count} due job(s).")
-        else:
-            st.info("No scheduled jobs are due.")
 
     st.subheader("Recent runs")
     occurrences = scheduler.occurrences()
