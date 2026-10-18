@@ -1,6 +1,6 @@
 # Project status
 
-**Last reconciled:** 2026-10-17
+**Last reconciled:** 2026-10-18
 **Overall state:** Prototype implementation in progress using NSE bhavcopy archives.
 
 ## Current scope
@@ -9,9 +9,10 @@
 - Python-coded daily/swing strategies with a shared-cash portfolio model.
 - Corporate-action discovery is broad across the NSE export; the initial
   strategy watchlist remains the current Nifty 50.
-- Initial data universe: current Nifty 50 constituents, captured with an
-  effective date, with at least five years of daily OHLCV for charting and early
-  research.
+- Initial strategy watchlist: current Nifty 50 constituents, captured with an
+  effective date. Daily bhavcopy imports retain all EQ rows per ADR-0004; this
+  broader archive supports the watchlist without changing the strategy
+  universe.
 - First visual data tool: a Price Explorer with a close-price time series,
   volume, underlying rows, 52-week high/low, and freshness/quality indicators.
 - No order placement, intraday/options research, or public data redistribution
@@ -22,11 +23,11 @@
 | Milestone | Status | Notes |
 |---|---|---|
 | 0. Source and format proof | Complete for sample | Successfully downloaded and parsed RELIANCE legacy and UDiFF bhavcopies across 2023-10-30 to 2024-10-30. Full-universe coverage validation remains. See ADR-0004. |
-| 1. Data foundation | In progress | Local raw archive, canonical daily prices, Parquet, SQLite catalog, and quality checks; RELIANCE sample is loaded locally. |
+| 1. Data foundation | In progress | Local raw archive, canonical daily prices, Parquet, SQLite catalog, and quality checks; price Parquet now spans 2023-10-30 through 2026-10-16 with 1,092,871 rows across 3,036 symbols. |
 | 2. Five-year Nifty 50 backfill | Not started | Checkpointed import and per-symbol coverage report. |
 | 3. Price Explorer | In progress | Local symbol/date selector, close chart, volume, and daily rows. |
-| 4. Daily refresh | In progress | TOML schedule configuration, SQLite schedules/run history, injected refresh handlers, app-start runner, and Schedulers controls are implemented. Fourteen scheduler/service/UI tests pass; live NSE automatic/manual refresh verification remains. The existing LaunchAgent cannot access this checkout under `Documents`; remove it after live verification. |
-| 5. Research readiness | In progress | Automated rolling NSE CSV retrieval is implemented and completed once on 2026-10-17. The refresh archived 11,845 source rows and staged 11,842 unique candidates across all symbols: 19 new and 5 missing rows were flagged; none were approved automatically. The weekday LaunchAgent is installed but macOS denied its access to this repository under `Documents`. Event verification, series eligibility, point-in-time membership, and reproducible run records remain. |
+| 4. Daily refresh | In progress | TOML schedules and SQLite run history are implemented. On 2026-10-18, both live manual scheduler jobs succeeded: corporate actions staged 11,841 candidates; price refresh imported 1,092,614 rows from 484 bhavcopies with 28 skipped dates and no session errors. Fourteen scheduler/service/UI tests pass. A real clock-triggered run still needs observation with the app left open; the blocked legacy LaunchAgent has been removed. |
+| 5. Research readiness | In progress | The latest rolling NSE CSV export on 2026-10-18 archived 11,844 source rows and staged 11,841 candidates across all symbols. One row absent from the covered snapshot was flagged for review; no candidate was approved automatically. Event verification, series eligibility, point-in-time membership, and reproducible run records remain. |
 | 6. Related datasets/hosting | Deferred | Add after price ingestion is dependable and remote operation is needed. |
 
 ## Accepted decisions
@@ -57,12 +58,11 @@
 
 ## Next concrete action
 
-Run the app's automatic and manual corporate-action refreshes against NSE and
-confirm successful run records and candidate staging. Remove the blocked
-LaunchAgent after those live runs succeed. Review refreshed action candidates
-against company filings; discovery alone does not adjust prices. After the
-scheduler is verified, start the five-year Nifty 50 price backfill with
-checkpoints and per-symbol coverage reporting.
+Keep the Streamlit app open through the next weekday schedule and confirm that
+the clock-triggered corporate-action and price occurrences complete in
+`job_occurrences`. Review the newly staged corporate-action candidate flagged
+as missing against the NSE source. Then start the five-year Nifty 50 backfill
+with checkpoints and per-symbol coverage reporting.
 
 ## Latest handoff
 

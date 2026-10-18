@@ -60,7 +60,9 @@ def refresh_missing_prices(
         raise ValueError("initial_window_days must be positive.")
     latest = LocalPriceStore(data_dir).latest_trade_date()
     start = from_date or (
-        latest + timedelta(days=1) if latest else today - timedelta(days=initial_window_days)
+        latest + timedelta(days=1)
+        if latest
+        else today - timedelta(days=initial_window_days - 1)
     )
     if start > today:
         return {

@@ -99,10 +99,9 @@ the last imported session; if no prices are loaded, it starts with only the
 most recent 14 calendar days. Use the explicit `backfill` command for the
 five-year initial history.
 
-The previous macOS LaunchAgent is retained only until the app runner's
-automatic and manual refreshes have been verified. It cannot access this
-checkout under `Documents`; remove it with
-`python3 scripts/corporate_action_schedule.py uninstall` after verification.
+The previous macOS LaunchAgent was removed after the app runner's live manual
+refreshes succeeded. The app runner is the active local scheduler; it requires
+the Streamlit process to remain open for clock-based runs.
 
 Run the automated refresh immediately:
 

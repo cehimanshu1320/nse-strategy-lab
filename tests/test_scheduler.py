@@ -309,7 +309,7 @@ def test_price_refresh_empty_store_uses_limited_window_and_surfaces_import_error
         today=__import__("datetime").date(2026, 10, 20),
         importer=importer,
     )
-    assert (captured["end"] - captured["start"]).days == 14
+    assert (captured["end"] - captured["start"]).days + 1 == 14
 
     def broken_importer(start, end, **kwargs):
         return {"errors": 1, "files_downloaded": 0, "files_skipped": 0, "rows_written": 0}
