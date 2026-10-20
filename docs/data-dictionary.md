@@ -3,14 +3,17 @@
 ## `daily_prices` (prototype)
 
 One NSE cash-market security and series per trading date. The prototype uses
-`(trade_date, symbol, series)` as its natural key; a dated instrument mapping
-will replace symbol-only identity before broad historical research.
+`(trade_date, symbol, series)` as its source-row natural key. Exchange symbols
+remain unchanged in Parquet. Research queries derive `instrument_id` and
+`source_symbol` from the effective-dated mappings in
+`src/nse_strategy_lab/domain/instruments.py`; this currently joins
+TATAMOTORS→TMPV and keeps TMCV separate.
 
 | Field | Type | Meaning / rules |
 |---|---|---|
 | `trade_date` | date | Exchange trading date from the source report; must match the requested report date. |
 | `symbol` | string | Uppercase NSE trading symbol from the bhavcopy. Display identifier, not permanent identity. |
-| `series` | string | NSE equity series; the first parser retains `EQ` series only. |
+| `series` | string | NSE equity series; the parser retains `EQ` and `BE` (trade-to-trade) rows. Other series are excluded from this research dataset. |
 | `open` | float | Exchange-reported opening price, INR per share, unadjusted. |
 | `high` | float | Exchange-reported daily high, INR per share, unadjusted. |
 | `low` | float | Exchange-reported daily low, INR per share, unadjusted. |
@@ -20,15 +23,17 @@ will replace symbol-only identity before broad historical research.
 | `trade_count` | integer or null | Source-reported number of trades. |
 | `source_file_id` | string | SHA-256 checksum of the immutable raw ZIP file. |
 
-The price query service also returns two derived fields for research and display.
+The price query service also returns derived fields for research and display.
 They are computed from the canonical daily rows at query time, so the source
 Parquet keeps only exchange-reported values and corrections to historical bars
 automatically flow into the result.
 
 | Field | Type | Meaning / rules |
 |---|---|---|
-| `high_52w` | float | Maximum daily `high` for the same symbol and series in the trailing 364 calendar days, including the row's own date. |
-| `low_52w` | float | Minimum daily `low` for the same symbol and series in the trailing 364 calendar days, including the row's own date. |
+| `high_52w` | float | Maximum daily `high` for the same instrument and series in the trailing 364 calendar days, including the row's own date. |
+| `low_52w` | float | Minimum daily `low` for the same instrument and series in the trailing 364 calendar days, including the row's own date. |
+| `instrument_id` | string | Derived stable identity used to combine date-effective symbols and keep distinct securities separate. Unknown tickers temporarily use their ticker as the identity. |
+| `source_symbol` | string | Exact ticker from the exchange report before any query-level company identity mapping. |
 
 The calculation uses only data dated on or before each row, preventing lookahead
 in historical strategy signals. Raw queries use unadjusted bhavcopy prices.
@@ -38,9 +43,37 @@ OHLC must be positive and satisfy `low <= open, close <= high`. Volume must be
 nonnegative. Corporate-action-adjusted prices are not stored in this dataset;
 they are derived from these raw prices and the separate action ledger.
 
+## `market_cap_observations` (Parquet)
+
+One NSE-reported market-cap observation per symbol and source date/period. This
+is separate from daily prices and contains no calculated or carried-forward
+values. Raw NSE source files are preserved under `data/raw/nse/market_cap/`;
+normalized observations are stored under
+`data/curated/market_cap_observations/`; import provenance belongs in the
+SQLite catalog. See [ADR-0011](decisions/ADR-0011-nse-market-cap-snapshots.md).
+
+| Field | Type | Meaning / rules |
+|---|---|---|
+| `observation_type` | string | `total_snapshot` for a quote-page point-in-time value or `average_period` for NSE's period average. |
+| `as_of_date` | date or null | Date attached to a point-in-time quote; null for period-average observations. Never substitute retrieval date. |
+| `period_start`, `period_end` | date or null | Inclusive source period for average observations; null for point-in-time quotes. |
+| `symbol` | string | NSE symbol shown by the source for the observation. |
+| `isin` | string or null | NSE security ISIN when present. The current all-company workbook does not provide it. |
+| `market_cap_inr_crore` | decimal/float | NSE-reported value normalized to ₹ crore. The 2025 workbook provides average market cap in ₹ lakh, converted by the unit factor 100; no market-cap calculation. |
+| `source_url` | string | URL of the exact NSE source file or quote page. |
+| `source_file_id` | string | SHA-256 checksum identifying the immutable raw response/file. |
+| `retrieved_at` | timestamp | UTC time the raw source response was captured. |
+
+An absent observation is unknown, not zero. Workbook rows marked “Not traded
+during the period” are omitted and counted in the import output. Do not carry a
+value between dates or use a current snapshot in historical backtests. Free-
+float market cap is a different measure and is not part of this initial
+dataset. Company-size labels require a separate explicit classification rule
+and effective date.
+
 ## `corporate_actions` (Parquet ledger)
 
-One reviewed event per symbol, equity series, action type, and ex-date. It is
+One reviewed event per source ticker, equity series, action type, and ex-date. It is
 stored separately at `data/curated/corporate_actions/actions.parquet`. Imports
 use `nse-strategy-lab import-actions <csv>` and merge by the natural key
 `(symbol, series, action_type, ex_date)`.
@@ -49,13 +82,17 @@ use `nse-strategy-lab import-actions <csv>` and merge by the natural key
 |---|---|---|
 | `symbol` | string | Uppercase NSE symbol. |
 | `series` | string | Uppercase security series, normally `EQ`. |
-| `action_type` | string | `bonus`, `split`, or `dividend`. |
+| `action_type` | string | `bonus`, `split`, `dividend`, or a specifically reviewed `demerger`. |
 | `announcement_date` | date | Public announcement date; required for point-in-time eligibility. |
 | `ex_date` | date | Date from which the action is reflected in exchange prices. |
 | `record_date` | date or null | NSE's shareholder-record date for eligibility; retained from the export or filing for reconciliation. It does not trigger price adjustment. |
 | `share_factor` | float or null | Total shares after / before event. A 1:1 bonus uses `2`; required for bonus/split. |
 | `cash_per_share` | float or null | Dividend amount per share entitled on the ex-date; required for dividends. |
 | `pay_date` | date or null | Payment date; required before dividend cash is spendable in the backtest. |
+| `distributed_symbol`, `distributed_series` | string or null | Child security and its first traded NSE series for a demerger distribution. |
+| `distribution_ratio` | float or null | Child shares issued per eligible parent share. |
+| `surviving_reference_price` | float or null | Exchange price-discovery reference for one share in the surviving parent security. |
+| `distributed_reference_price` | float or null | Exchange or documented reference value for one distributed child share. |
 | `terms` | string or null | Human-readable ratio or event terms. |
 | `source_url` | string or null | Source filing/report URL. At least one provenance field is required. |
 | `source_file_id` | string or null | Identifier/checksum for a locally retained source document. |
@@ -75,8 +112,30 @@ Cash dividends adjust pre-ex-date OHLC by `(preceding adjusted close -
 dividend per share) / preceding adjusted close`, with volume unchanged. This is
 not a reinvested total-return series. The engine separately accounts for
 dividend receivables when shares are held through the prior close and adds cash
-on pay date. Rights issues, mergers, and other complex events are unsupported.
-Keep raw columns for reconciliation.
+on pay date.
+
+For a reviewed demerger, pre-ex-date parent OHLC is restated by
+`surviving_reference_price / preceding adjusted close`; volume is unchanged.
+The portfolio engine distributes `distribution_ratio` child shares to each
+parent share held through the prior close, allocates the original cost basis
+between the parent and child using their documented reference values, and
+marks the child at its reference price until an exchange bar is available.
+Tata Motors is the implemented demerger case. Other reorganizations remain
+unsupported until their terms and accounting are explicitly modeled. Keep raw
+columns for reconciliation.
+
+## Derived Tata Motors identity
+
+| Raw exchange symbol | Date interval | Derived `instrument_id` | Research/display symbol |
+|---|---|---|---|
+| `TATAMOTORS` | Through 2025-10-23 | `TATA_MOTORS_PV` | `TMPV` |
+| `TMPV` | From 2025-10-24 | `TATA_MOTORS_PV` | `TMPV` |
+| `TMCV` | From its 2025-11-12 trading start | `TATA_MOTORS_CV` | `TMCV` |
+
+The Price Explorer shows TMPV as one company history, retains each row's
+`source_symbol`, and adjusts pre-demerger history to the ₹400 surviving-company
+reference price discovered on 2025-10-14. TMCV remains a separate company and
+has no generated prices before its first trading session.
 
 ## `corporate_action_candidates` (review staging)
 

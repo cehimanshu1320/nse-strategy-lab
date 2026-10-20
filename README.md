@@ -51,6 +51,27 @@ Parquet under `data/curated/`, and provenance/import status in
 latest imported session. The Streamlit app reads local data only; it never
 starts downloads during page rendering.
 
+In the Price Explorer, choose the symbol and price basis in the sidebar. Select
+a date range from the visible presets in the chart panel, or choose **Custom**
+to enter dates. The **Price** and **Volume** pills control which series appear;
+when both are selected, they use separate vertical scales. Move the pointer
+over the chart to see the nearest session's date, closing price, and volume.
+The Market Cap section below the price chart shows locally imported NSE-reported
+market-cap observations and their source dates or periods. The available
+all-company workbook reports six-month average market cap, not today's point-in-
+time value. Import a downloaded NSE workbook with:
+
+```bash
+nse-strategy-lab import-market-cap path/to/nse-market-cap.xlsx
+```
+
+The source is the downloadable all-company workbook on NSE's [all-company market-capitalisation page](https://www.nseindia.com/static/regulations/listing-compliance/nse-market-capitalisation-all-companies).
+The import preserves the original workbook, stores normalized observations
+separately from prices, and records its checksum in the SQLite catalog. Refresh
+is manual, when NSE publishes a new workbook; NSE gives no fixed release
+interval, so there is no polling or scheduler job. Current quote snapshots
+remain gated on validating NSE's response semantics and data-use terms.
+
 To download the rolling five-year history plus one year of announced future
 NSE corporate actions and stage it for review, run:
 
@@ -94,10 +115,12 @@ Job behavior is registered separately in the app and remains in application
 services.
 
 The corporate-action job archives the exact rolling export and stages
-candidates for review. It never approves events. The price job catches up from
-the last imported session; if no prices are loaded, it starts with only the
-most recent 14 calendar days. Use the explicit `backfill` command for the
-five-year initial history.
+candidates for review. It never approves events. The price job imports every
+`EQ`- and `BE`-series security present in each NSE bhavcopy, rechecks the most
+recent 14 calendar days, and catches up from the last stored session. It stops at the
+first download or parse error so a later run resumes from that point. If no
+prices are loaded, it starts with only the most recent 14 calendar days. Use
+the explicit `backfill` command for historical data.
 
 The previous macOS LaunchAgent was removed after the app runner's live manual
 refreshes succeeded. The app runner is the active local scheduler; it requires
@@ -149,11 +172,20 @@ For already canonical, reviewed datasets, the lower-level `import-actions`
 command is also available. Required columns are
 `symbol,series,action_type,announcement_date,ex_date`; `record_date` is optional;
 bonus/split rows also need `share_factor`, and dividend rows need
-`cash_per_share,pay_date`. Every row
+`cash_per_share,pay_date`. Demerger rows need `distributed_symbol`,
+`distributed_series`, `distribution_ratio`, and reference prices for the
+surviving and distributed securities. Every row
 must include `source_url` or `source_file_id`. Example:
 
 ```bash
 nse-strategy-lab import-actions actions.csv
+```
+
+The reviewed Tata Motors demerger terms are included in the repository. Import
+them into the local action ledger with:
+
+```bash
+nse-strategy-lab import-actions configs/corporate_actions/tata_motors_demerger_2025.csv
 ```
 
 The Price Explorer defaults to the corporate-action-adjusted view and also
@@ -162,10 +194,16 @@ action ledger; no duplicate adjusted-price table is stored. The backtest page
 can accept the same action CSV: strategies receive point-in-time adjusted
 history, while simulated fills and marks use raw prices. Bonus/split events
 adjust held share counts; dividends adjust historical signal prices and are
-credited to portfolio cash on pay date. Rights issues and complex
-reorganizations are not modeled yet.
+credited to portfolio cash on pay date. The Tata Motors demerger is modeled:
+the TMPV view joins TATAMOTORS history and restates pre-event prices to the
+surviving-security reference; a held position receives one TMCV share per
+eligible parent share, with cost basis allocated across both companies. TMCV
+remains a separate price series. Other rights issues and complex
+reorganizations are not modeled. See [ADR-0006](docs/decisions/ADR-0006-corporate-action-adjustments.md),
+[ADR-0010](docs/decisions/ADR-0010-tata-motors-demerger-and-security-identity.md),
+and [ADR-0009](docs/decisions/ADR-0009-company-selection-not-index-replication.md).
 
-By default, imported Parquet includes every `EQ`-series security in each daily
+By default, imported Parquet includes every `EQ`- and `BE`-series security in each daily
 bhavcopy. Pass `--symbols` to limit curated rows to a comma-separated list; the
 original source ZIP is still retained unchanged.
 

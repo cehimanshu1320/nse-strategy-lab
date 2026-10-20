@@ -21,9 +21,10 @@ distinguishable.
   actions and an adjustment method have been documented and validated.
 - Use the NIFTY 50 Total Returns Index (TRI) as the initial strategy benchmark,
   subject to confirming an allowed, repeatable data source for it.
-- Do not describe a strategy run on today's roster across older dates as a
-  point-in-time Nifty 50 backtest. Historical constituent membership is a
-  separate future data requirement.
+- Treat the captured roster as an initial company watchlist, not as a
+  point-in-time reconstruction of the Nifty 50 index portfolio. Strategies
+  research companies directly; historical index constituent membership is
+  outside the current product scope.
 
 ## Consequences
 
@@ -32,7 +33,8 @@ distinguishable.
 - Benchmark returns include the total-return concept represented by TRI;
   benchmark observations and source provenance must be stored alongside the
   benchmark identity.
-- The current roster supports charting and prototyping, but introduces
-  survivorship bias when applied to historical cross-sectional backtests.
+- The current roster is a user-selected research starting point. Results must
+  describe the selected companies and dates, not claim to represent historical
+  Nifty 50 constituents.
 - These product choices do not grant permission to collect or use NSE data;
   source rights remain governed by ADR-0002's open gate.

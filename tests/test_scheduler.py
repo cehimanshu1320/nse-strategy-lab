@@ -10,6 +10,8 @@ from nse_strategy_lab.config.schedules import (
     ScheduleDefinition,
     load_schedule_definitions,
 )
+from nse_strategy_lab.ingestion.jobs import bhavcopy_import
+from nse_strategy_lab.ingestion.sources.nse.bhavcopy_client import DownloadedReport
 from nse_strategy_lab.services import refresh as refresh_service
 from nse_strategy_lab.services.scheduler import LocalScheduler
 from nse_strategy_lab.scheduling.calendar import next_weekday_occurrence
@@ -285,9 +287,11 @@ def test_price_refresh_handler_catches_up_from_latest_session(monkeypatch: pytes
         importer=importer,
     )
 
-    assert captured["start"].isoformat() == "2026-10-16"
+    assert captured["start"].isoformat() == "2026-10-07"
     assert captured["end"].isoformat() == "2026-10-20"
+    assert captured["stop_on_error"] is True
     assert result["rows_written"] == 50
+    assert result["price_scope"] == "all EQ- and BE-series securities present in each NSE bhavcopy"
 
 
 def test_price_refresh_empty_store_uses_limited_window_and_surfaces_import_errors(
@@ -301,7 +305,7 @@ def test_price_refresh_empty_store_uses_limited_window_and_surfaces_import_error
     captured: dict[str, object] = {}
 
     def importer(start, end, **kwargs):
-        captured.update(start=start, end=end)
+        captured.update(start=start, end=end, **kwargs)
         return {"errors": 0, "files_downloaded": 0, "files_skipped": 10, "rows_written": 0}
 
     refresh_service.refresh_missing_prices(
@@ -310,6 +314,7 @@ def test_price_refresh_empty_store_uses_limited_window_and_surfaces_import_error
         importer=importer,
     )
     assert (captured["end"] - captured["start"]).days + 1 == 14
+    assert captured["stop_on_error"] is True
 
     def broken_importer(start, end, **kwargs):
         return {"errors": 1, "files_downloaded": 0, "files_skipped": 0, "rows_written": 0}
@@ -320,6 +325,60 @@ def test_price_refresh_empty_store_uses_limited_window_and_surfaces_import_error
         importer=broken_importer,
     )
     assert failed["errors"] == 1
+
+
+def test_price_import_stops_at_first_failed_session_when_refreshing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attempts: list[date] = []
+    recorded_sources: list[date] = []
+    finished: dict[str, object] = {}
+
+    class Store:
+        def __init__(self, data_dir):
+            self.raw_dir = Path(data_dir) / "raw"
+            self.raw_dir.mkdir(parents=True)
+
+        def start_run(self, start, end):
+            return "run-id"
+
+        def save_raw(self, report):
+            return self.raw_dir / report.filename, "checksum", True
+
+        def record_source(self, report, path, checksum, source_format):
+            recorded_sources.append(report.trade_date)
+
+        def upsert_prices(self, prices):
+            return 1
+
+        def finish_run(self, run_id, **kwargs):
+            finished.update(kwargs)
+
+    class Client:
+        def download(self, trade_date):
+            attempts.append(trade_date)
+            return DownloadedReport(trade_date, "https://example.test/report.zip", b"PK", "report.zip")
+
+    def parse(content, trade_date, checksum):
+        raise ValueError("unrecognized archive format")
+
+    monkeypatch.setattr(bhavcopy_import, "LocalPriceStore", Store)
+    monkeypatch.setattr(bhavcopy_import, "NseBhavcopyClient", Client)
+    monkeypatch.setattr(bhavcopy_import, "parse_bhavcopy", parse)
+
+    result = bhavcopy_import.import_bhavcopy_range(
+        date(2026, 10, 19),
+        date(2026, 10, 21),
+        data_dir=tmp_path,
+        progress=lambda _: None,
+        stop_on_error=True,
+    )
+
+    assert attempts == [date(2026, 10, 19)]
+    assert recorded_sources == []
+    assert result["errors"] == 1
+    assert result["failed_dates"] == ["2026-10-19"]
+    assert finished["status"] == "completed_with_errors"
 
 
 def test_corporate_action_handler_delegates_to_existing_staging_workflow(

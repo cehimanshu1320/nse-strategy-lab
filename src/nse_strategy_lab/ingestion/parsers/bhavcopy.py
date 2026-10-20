@@ -11,6 +11,9 @@ import pandas as pd
 from nse_strategy_lab.domain.market_data import PRICE_COLUMNS
 
 
+SUPPORTED_EQUITY_SERIES = {"EQ", "BE"}
+
+
 def _read_csv_from_zip(content: bytes) -> pd.DataFrame:
     try:
         with ZipFile(BytesIO(content)) as archive:
@@ -50,7 +53,7 @@ def _legacy_prices(frame: pd.DataFrame, trade_date: date, source_file_id: str) -
         }
     )
     result["trade_date"] = result["trade_date"].fillna(pd.Timestamp(trade_date)).dt.date
-    result = result[result["series"] == "EQ"]
+    result = result[result["series"].isin(SUPPORTED_EQUITY_SERIES)]
     return _coerce_and_validate(result, trade_date)
 
 
@@ -90,7 +93,7 @@ def _udiff_prices(frame: pd.DataFrame, trade_date: date, source_file_id: str) ->
         }
     )
     result["trade_date"] = result["trade_date"].fillna(pd.Timestamp(trade_date)).dt.date
-    result = result[result["series"] == "EQ"]
+    result = result[result["series"].isin(SUPPORTED_EQUITY_SERIES)]
     return _coerce_and_validate(result, trade_date)
 
 
@@ -104,7 +107,9 @@ def _coerce_and_validate(frame: pd.DataFrame, expected_date: date) -> pd.DataFra
     frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
 
     if frame.empty:
-        raise ValueError(f"No EQ-series rows found in bhavcopy for {expected_date}")
+        raise ValueError(
+            f"No supported equity-series rows (EQ or BE) found in bhavcopy for {expected_date}"
+        )
     if frame["symbol"].isna().any() or frame["symbol"].eq("").any():
         raise ValueError("Bhavcopy contains an empty symbol")
     if frame["trade_date"].ne(expected_date).any():

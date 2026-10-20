@@ -52,27 +52,41 @@ def refresh_missing_prices(
     from_date: date | None = None,
     today: date | None = None,
     initial_window_days: int = 14,
-    importer: Callable[..., dict[str, int | str]] = import_bhavcopy_range,
+    recheck_days: int = 14,
+    importer: Callable[..., dict[str, object]] = import_bhavcopy_range,
 ) -> dict[str, object]:
-    """Import missing sessions using one shared CLI and scheduler policy."""
+    """Import EQ/BE rows, catching up and rechecking recent report dates."""
     today = today or date.today()
     if initial_window_days < 1:
         raise ValueError("initial_window_days must be positive.")
+    if recheck_days < 1:
+        raise ValueError("recheck_days must be positive.")
     latest = LocalPriceStore(data_dir).latest_trade_date()
-    start = from_date or (
-        latest + timedelta(days=1)
-        if latest
-        else today - timedelta(days=initial_window_days - 1)
-    )
+    if from_date:
+        start = from_date
+    elif latest:
+        catch_up_start = latest + timedelta(days=1)
+        recheck_start = today - timedelta(days=recheck_days - 1)
+        start = min(catch_up_start, recheck_start)
+    else:
+        start = today - timedelta(days=initial_window_days - 1)
     if start > today:
         return {
             "status": "already_current",
             "latest_session": latest.isoformat() if latest else None,
             "errors": 0,
+            "price_scope": "all EQ- and BE-series securities present in each NSE bhavcopy",
         }
-    result = importer(start, today, data_dir=data_dir, progress=lambda _: None)
+    result = importer(
+        start,
+        today,
+        data_dir=data_dir,
+        progress=lambda _: None,
+        stop_on_error=True,
+    )
     return {
         **result,
         "start": start.isoformat(),
         "end": today.isoformat(),
+        "price_scope": "all EQ- and BE-series securities present in each NSE bhavcopy",
     }

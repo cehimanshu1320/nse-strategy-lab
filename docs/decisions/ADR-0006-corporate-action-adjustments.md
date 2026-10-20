@@ -34,8 +34,10 @@ Strategies must not use a corporate action before it was publicly announced.
   raw prices. At a bonus/split ex-date, multiply held quantity by the factor
   and divide per-share cost basis by it. Dividends create a receivable for
   positions held through the prior close; cash becomes spendable on pay date.
-- Initially support bonus, split, and cash dividend. Event data is explicitly
-  imported/reviewed; app rendering never scrapes it.
+- Initially support bonus, split, and cash dividend. Tata Motors' reviewed
+  2025 demerger is added as a specifically modeled distribution under
+  [ADR-0010](ADR-0010-tata-motors-demerger-and-security-identity.md). Event
+  data is explicitly imported/reviewed; app rendering never scrapes it.
 
 ## Consequences
 
@@ -47,8 +49,10 @@ Strategies must not use a corporate action before it was publicly announced.
   optimization must preserve the same as-of behavior.
 - Incorrect or missing event records can distort adjusted history, so the
   ledger requires a source URL or source-file identifier.
-- Rights issues, mergers, demergers, symbol changes, and other complex events
-  are not modeled in this implementation.
+- Rights issues, mergers, and reorganizations other than the specifically
+  modeled Tata Motors demerger remain unsupported. ADR-0010 defines the
+  TATAMOTORS/TMPV identity, TMCV distribution, price basis, and portfolio
+  treatment for that event.
 
 ## Alternatives considered
 

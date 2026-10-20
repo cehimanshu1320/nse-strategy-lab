@@ -36,9 +36,15 @@ def build_refresh_handlers(
             today=today_in_schedule_timezone("price_refresh"),
         )
         if int(result.get("errors", 0)):
+            failed_dates = result.get("failed_dates") or []
+            failed_date_summary = (
+                f" First failed session: {failed_dates[0]}."
+                if failed_dates
+                else ""
+            )
             raise RuntimeError(
                 f"Price import had {result['errors']} failed session(s); "
-                "see the import catalog for details."
+                f"see the import catalog for details.{failed_date_summary}"
             )
         return result
 

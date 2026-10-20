@@ -14,7 +14,7 @@ catch_up = "coalesce_to_latest_export"
 [[jobs]]
 id = "price_refresh"
 name = "Daily price refresh"
-description = "Import missing bhavcopy sessions since the last accepted date."
+description = "Import all NSE EQ and BE securities; catch up and recheck recent reports."
 timezone = "Asia/Kolkata"
 cadence = "weekdays"
 hour = 18

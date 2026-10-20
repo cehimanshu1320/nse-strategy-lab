@@ -51,6 +51,19 @@ NSE CSV source adapter ◄── Scheduled job service ◄── Local app runne
               Approved corporate_actions ledger
 ```
 
+```text
+NSE all-company market-cap workbook (average period value)
+    │
+    ▼
+Explicit market-cap importer ──► Immutable raw workbook + checksum
+    │                                        │
+    ▼                                        ▼
+Validated market-cap observations      SQLite import provenance
+    │
+    ▼
+Separate market_cap_observations Parquet dataset
+```
+
 The Streamlit app is a client of application services. The importer is an
 explicit command-line job. Rendering a page must not download data or mutate
 stored prices. The current prototype uses the direct archive URL patterns
@@ -67,7 +80,10 @@ recorded in ADR-0004 and will reassess its source after testing.
   starts with the app and checks for due jobs; the future hosted runner is a
   worker or managed scheduler. Streamlit displays status and enqueues requests.
   The current weekday defaults are corporate-action refresh at 18:30 and price
-  refresh at 18:40 Asia/Kolkata. These definitions and their enabled state are
+  refresh at 18:40 Asia/Kolkata. The price job imports all `EQ`- and `BE`-series
+  records from each NSE bhavcopy, rechecks the most recent 14 calendar days, catches up
+  from the latest stored session, and stops on the first hard session error so
+  a later run can resume there. These definitions and their enabled state are
   persisted in SQLite, separately from the runner. Operational settings live
   in `configs/schedules.toml`; the app composition root injects handlers for
   the stable job IDs and a scheduler repository, so the runner has no
@@ -77,18 +93,29 @@ recorded in ADR-0004 and will reassess its source after testing.
   used by the public page's export control. Responses are validated before
   staging; changed, blocked, empty, or malformed responses produce a logged
   error. Manual page exports remain a fallback.
+- **Market-cap source adapter:** the explicit importer accepts NSE's published
+  all-company XLSX, archives the original file, validates its known header and
+  rows, preserves its average period and converts the stated lakh unit to crore.
+  It omits rows explicitly marked “Not traded during the period.” Quote-page
+  current snapshots remain gated on validating response semantics and data-use
+  terms (ADR-0011); the irregular workbook is not scheduled.
 - **Parser:** knows one report layout/version and converts it into a canonical
   record. Legacy and UDiFF parsers may coexist behind one parser interface.
   Corporate-action summary rows are parsed into review candidates, not directly
   into approved adjustment events.
 - **Domain/schema:** defines instrument identity, canonical prices, events, and
-  validation rules independently of NSE column names.
+  validation rules independently of NSE column names. Effective-dated symbol
+  identity is derived in `domain/instruments.py`; raw Parquet retains the exact
+  NSE ticker. The current explicit identity mapping covers TATAMOTORS/TMPV and
+  keeps TMCV separate.
 - **Quality service:** checks coverage, keys, price constraints, and anomalies.
   It distinguishes hard failures from reviewable warnings.
 - **Storage:** writes raw files, curated Parquet partitions, and import metadata.
   Repository methods hide file paths and SQL from application/UI code.
-- **Application services:** orchestrate backfill, daily refresh, price queries,
-  and reproducible research runs.
+- **Application services:** orchestrate backfill, daily refresh, price and
+  market-cap snapshot queries, and reproducible research runs. Market-cap
+  queries read only the separate curated snapshot dataset; they do not fetch
+  NSE data while rendering a page.
 - **Strategies:** calculate signals from supplied canonical data and
   parameters. They do not download, persist, or render data.
 - **Backtest engine:** turns strategy signals into fills and portfolio state
@@ -102,7 +129,12 @@ recorded in ADR-0004 and will reassess its source after testing.
    report type, trade date, retrieval time, and checksum.
 2. **Canonical:** normalized exchange-reported daily prices and reviewed
    corporate actions in separate Parquet datasets. `daily_prices` is always
-   unadjusted. Actions include announcement/ex-dates and source provenance.
+   unadjusted and keyed by `(trade_date, symbol, series)` to preserve source
+   identity. Research queries derive stable instrument IDs and ticker aliases.
+   Actions include announcement/ex-dates and source provenance. NSE-reported
+   market-cap observations are stored in a separate
+   `market_cap_observations` Parquet dataset with their source date or period,
+   measure, and provenance; missing dates remain missing.
 3. **Derived:** adjusted OHLCV, indicators, backtest results, and charts. The
    adjustment service derives a chart snapshot from raw bars plus actions; it
    does not persist duplicate adjusted prices. Strategy signals are recomputed
@@ -115,9 +147,12 @@ with an explicit method; it is never an invisible edit to exchange values.
 
 ## Contracts and invariants
 
-- A security uses a stable internal `instrument_id`; symbol/series mappings are
-  date-effective because symbols can change.
-- A daily price row is unique on `(trade_date, instrument_id, series)`.
+- A research view uses a stable internal `instrument_id`; explicit
+  symbol/series mappings are date-effective because symbols can change. Unknown
+  tickers currently fall back to their symbol until a persisted instrument
+  master is added.
+- A raw daily price row is unique on `(trade_date, symbol, series)`; derived
+  company views use `(trade_date, instrument_id, series)`.
 - Every canonical row retains source-file/run provenance.
 - An import is idempotent for the same report/date and can be safely retried.
 - A new data partition is promoted only after parsing and required checks pass.
@@ -127,12 +162,13 @@ with an explicit method; it is never an invisible edit to exchange values.
   model.
 - Future corporate actions cannot affect earlier signals: an event is eligible
   only after its announcement date and ex-date. Supported event types and
-  accounting rules are in ADR-0006.
+  accounting rules are in ADR-0006 and the Tata Motors-specific extension in
+  ADR-0010.
 - Research runs identify strategy revision, parameters, universe, costs, and
   input-data snapshot.
-- Current Nifty 50 watchlist membership and historical index membership are
-  separate concepts. Current constituents alone do not establish a
-  point-in-time historical universe.
+- The captured Nifty 50 roster is a company watchlist, not historical index
+  membership. Strategies name the companies they use; historical index
+  replication would require a separate future feature and data source.
 
 ## Intended local deployment
 
@@ -145,7 +181,10 @@ with an explicit method; it is never an invisible edit to exchange values.
   and unique occurrence key
   prevent duplicate execution across reruns and sessions. Missed weekdays
   coalesce to one current run; a price refresh imports from the latest accepted
-  session, or only the recent 14-day window when no price data exists. The
+  session and rechecks a recent 14-day window for temporarily unavailable
+  reports, or imports only the recent 14-day window when no price data exists.
+  A hard download or parse error stops the range before the stored date
+  watermark can advance past the failure. The
   local runner cannot execute while the app is closed; it catches up on next
   startup according to each job's policy. Failed occurrences can be retried
   from the Schedulers workspace.

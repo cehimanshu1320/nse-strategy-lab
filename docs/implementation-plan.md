@@ -1,7 +1,7 @@
 # NSE Strategy Lab implementation plan
 
 **Status:** Proposed implementation sequence
-**Updated:** 2026-10-17
+**Updated:** 2026-10-19
 
 For the current milestone, open gates, and next action, see
 [`project-status.md`](project-status.md). Keep milestone definitions here and
@@ -19,15 +19,17 @@ release will provide:
   and the Streamlit UI.
 
 The initial release is for historical research and review. It will not place
-orders, provide real-time data, or claim that backtests represent the exact
-historical Nifty 50 universe until point-in-time constituent data is available.
+orders or provide real-time data. The captured Nifty 50 roster is a starting
+watchlist of companies; the app does not claim to reproduce the historical
+index portfolio.
 
 ## 2. Decisions for the first release
 
 | Area | First-release decision |
 |---|---|
-| Universe | Current Nifty 50 constituents, captured with an effective date and source file. |
+| Universe | Directly selected companies, starting with the current Nifty 50 constituents captured with an effective date and source file. |
 | Price history | At least five years of daily OHLCV; retain the exchange-reported values as raw prices. |
+| Market capitalization | Store NSE-reported values in ₹ crore as typed point snapshots or period averages. Keep them separate from prices; do not infer missing dates. See ADR-0011. |
 | Initial event data | Discover actions from NSE CSV exports for all symbols, archive and stage candidates for review, then promote verified supported events to a separate ledger. Defer bulk/block deals until price ingestion is stable. |
 | Data source | Prototype with date-based direct NSE bhavcopy archive URLs through an explicit CLI importer; reassess the source after testing. |
 | Price basis and benchmark | Preserve raw exchange-reported bars and derive an explicitly labeled, point-in-time corporate-action-adjusted view from an action ledger. Use NIFTY 50 TRI as the initial benchmark, subject to an allowed source. |
@@ -35,13 +37,17 @@ historical Nifty 50 universe until point-in-time constituent data is available.
 | Refresh | Run the explicit local importer for missing sessions. The importer remains outside Streamlit. |
 | Scheduling and hosting | Local app-start catch-up with a persistent scheduler dashboard. Keep job definitions independent of the runner; hosted deployments use a dedicated worker/managed scheduler and durable shared storage. |
 
-### Universe caveat
+### Universe and security-history rules
 
-The current Nifty 50 roster is a useful initial watchlist, but applying today's
-50 names to all five prior years creates survivorship bias in portfolio
-backtests. Store current watchlist membership separately from historical index
-membership. Add effective-dated historical constituents before labeling a
-cross-sectional strategy as a historical Nifty 50 backtest.
+The captured Nifty 50 roster is only the initial list of companies to inspect.
+Users select securities directly, so historical index entry/exit membership is
+not required by the current product. A run must identify its selected companies
+and dates and must not be described as a reconstruction of the historical Nifty
+50 portfolio. Symbol changes can extend observed security history when a
+reviewed effective-dated identity mapping exists. Demergers require explicit
+price restatement and portfolio distribution accounting; Tata Motors is the
+first implemented case. Newly listed securities have no pre-listing price
+history.
 
 ## 3. Data tables
 
@@ -52,18 +58,19 @@ records live in Parquet; small operational records live in the SQLite catalog.
 
 | Dataset | Grain and key | Important fields |
 |---|---|---|
-| `daily_prices` | One security/series per trading date; key `(trade_date, instrument_id, series)` | `symbol`, `open`, `high`, `low`, `close`, `volume`, `turnover`, `trade_count`, `source_file_id` where available. Keep exchange-reported prices unadjusted. Price queries derive trailing 364-calendar-day `high_52w` and `low_52w` as-of each row. |
+| `daily_prices` | One source symbol/series per trading date; key `(trade_date, symbol, series)` | `symbol`, `open`, `high`, `low`, `close`, `volume`, `turnover`, `trade_count`, `source_file_id` where available. Keep exchange-reported prices unadjusted. Queries derive effective-dated instrument identity and trailing 364-calendar-day extrema. |
+| `market_cap_observations` | One NSE market-cap value per symbol and point date or period; key `(observation_type, date/period, symbol)` | Observation type, point `as_of_date` or period start/end, market cap in ₹ crore, symbol/ISIN, source URL/checksum, retrieval time. Period averages remain distinct from point snapshots. |
 | `daily_security_stats` | One security per date for supplemental daily exchange metrics | `deliverable_quantity`, `deliverable_percent`, and other fields when available from a separate report. Keep source provenance. |
-| `corporate_actions` | One action per security/action event; key `(symbol, series, action_type, ex_date)` | `action_type`, `announcement_date`, `ex_date`, `share_factor` or `cash_per_share`, `pay_date`, terms, source URL/file ID. Bonus/split factors adjust historical price/volume; dividends adjust historical price and portfolio cash accounting. |
+| `corporate_actions` | One action per source symbol/action event; key `(symbol, series, action_type, ex_date)` | `action_type`, `announcement_date`, `ex_date`, `share_factor` or `cash_per_share`, demerger child security/ratio/reference prices, `pay_date`, terms, source URL/file ID. Bonus/split factors adjust historical price/volume; dividends and supported demergers adjust price history and portfolio accounting. |
 | `corporate_action_candidates` | One candidate row per NSE export entry | Original purpose text and dates, inferred event type/terms, review status/notes, source export checksum and URL. Candidates never adjust prices. |
 | `deals` | One disclosed deal | `deal_date`, `available_at`, `instrument_id`, `deal_type`, buyer/seller, quantity, price, source. Add only after price history is dependable. |
-| `index_membership` | One membership interval per index/security | `index_code`, `instrument_id`, `valid_from`, `valid_to`, source. Needed for point-in-time Nifty 50 testing. |
+| `index_membership` | Deferred optional dataset for a future index-replication feature; not required for direct company research. |
 
 ### Reference and operational data in SQLite
 
 | Table | Purpose |
 |---|---|
-| `instruments` | Stable internal ID, exchange, ISIN when available, and dated symbol/series mappings. A ticker is a display value, not a permanent identity. |
+| `instruments` | Future persisted master for stable IDs and dated symbol/series mappings. The current Tata Motors mapping is domain code and query-derived; canonical Parquet retains source tickers. |
 | `watchlist_membership` | Dated membership in the initial Nifty 50 watchlist, including the source and capture date of the constituent list. |
 | `source_files` | Report name, trade date, retrieval time, local raw-file path, SHA-256, byte size, and parser/schema version. |
 | `ingest_runs` | Job start/end, requested date range, status, inserted/updated row counts, and error summary. |
@@ -76,6 +83,17 @@ records live in Parquet; small operational records live in the SQLite catalog.
 Parquet should be partitioned by dataset and month (or year if monthly files
 become too small). Avoid one file per symbol or one tiny file per day. The raw
 NSE files and all market data are excluded from Git.
+
+Market-cap source files are kept under `data/raw/nse/market_cap/`, normalized
+observations under `data/curated/market_cap_observations/`, and import
+provenance in `data/catalog.sqlite`. The explicit importer currently handles
+NSE's [all-company market-capitalisation workbook](https://www.nseindia.com/static/regulations/listing-compliance/nse-market-capitalisation-all-companies),
+including the July–December 2025 file whose figures are period-average market
+cap in ₹ lakh. It converts the unit to crore without changing the measure.
+Refresh is manual when NSE publishes a new file; NSE specifies no fixed release
+interval, and this source is not polled or scheduled. Current quote snapshot
+retrieval remains gated on validating response semantics and data-use terms.
+See [ADR-0011](decisions/ADR-0011-nse-market-cap-snapshots.md).
 
 ## 4. Import and processing workflow
 
@@ -226,7 +244,7 @@ nse-strategy-lab/
 │   │   └── jobs/                  # Backfill and daily refresh workflows
 │   ├── quality/                   # Data checks and coverage reports
 │   ├── storage/                   # Parquet and SQLite repositories
-│   ├── universe/                  # Watchlist and dated index membership
+│   ├── universe/                  # Company selection and watchlist services
 │   ├── domain/corporate_actions.py # Event schema and validation
 │   ├── services/adjustments.py    # Point-in-time adjusted strategy bars
 │   ├── strategies/                # Pure Python signal generation
@@ -292,12 +310,15 @@ SQL or downloading reports directly.
 - Import reviewed bonus, split, and dividend events into a provenance-aware
   ledger; derive adjusted chart snapshots and point-in-time strategy bars.
 - Keep backtest fills on raw bars and apply share/cash actions to held positions.
-- Add historical Nifty 50 membership effective dates before claiming
-  point-in-time Nifty 50 portfolio results.
+- Keep results labeled by their selected companies; do not claim historical
+  index replication without a separate future scope decision and constituent
+  history.
 - Persist reproducible strategy run inputs and outputs.
 - **Current prototype:** raw/adjusted Price Explorer, action CSV import, and
-  raw-fill corporate-action accounting are wired. Full event coverage,
-  historical-universe membership, and reproducibility records remain open.
+  raw-fill corporate-action accounting are wired. Tata Motors TATAMOTORS→TMPV
+  identity, its reviewed 1:1 TMCV distribution, exchange-reference adjustment,
+  and TMCV BE-to-EQ history are supported. Full event coverage and
+  reproducibility records remain open; other reorganizations are unsupported.
 - **Collection path:** export archiving, checksum manifest, all-symbol
   candidate parsing, review CSV output, and automated retrieval through NSE's
   current page-export route are implemented. The initial five-year snapshot
@@ -350,9 +371,12 @@ SQL or downloading reports directly.
    application services used by both CLI and scheduler. The runner must not
    depend on the data handlers or concrete database implementation. Corporate
    actions refresh the rolling five-year export plus one year forward and stage
-   candidates only. Price refresh starts after the latest imported session;
-   when the store is empty, it imports only the latest 14 calendar days so app
-   startup cannot trigger the five-year backfill.
+   candidates only. Price refresh imports all EQ- and BE-series records from each
+   daily bhavcopy, rechecks the most recent 14 calendar days, catches up from
+   the latest stored session, and stops at the first hard download or parse
+   error so the next run resumes there. When the store is empty, import only
+   the latest 14 calendar days so app startup cannot trigger the five-year
+   backfill.
 4. Add scheduler controls for enabled state, manual per-job runs, run-all-due,
    recent status/result/error history, and retrying failed runs. Manual and
    scheduled execution use the same handler and accounting path.
@@ -385,3 +409,6 @@ worker and shared database remain deferred.
 - [NSE Data Sharing & Usage Policy](https://www.nseindia.com/static/market-data/nse-data-policy)
 - [NSE data list for research and analysis](https://nsearchives.nseindia.com/web/sites/default/files/inline-files/Data%20list%20under%20NSE%20Data%20Sharing%20Policy%20for%20Research%20and%20Analysis_20250728.pdf)
 - [Nifty 50 index and constituents](https://www.niftyindices.com/indices/equity/broad-based-indices/nifty--50)
+- [NSE company quote pages](https://www.nseindia.com/get-quotes/equity?symbol=RELIANCE) (reported total market cap)
+- [NSE all-company market-capitalisation files](https://www.nseindia.com/static/regulations/listing-compliance/nse-market-capitalisation-all-companies)
+- [NSE Data Sharing & Usage Policy](https://www.nseindia.com/static/market-data/nse-data-policy)

@@ -47,3 +47,6 @@ Options and why they were not chosen.
 - [ADR-0006: Keep raw prices and derive point-in-time adjusted views](ADR-0006-corporate-action-adjustments.md)
 - [ADR-0007: Stage NSE corporate-action exports before approval](ADR-0007-nse-corporate-action-ingestion.md)
 - [ADR-0008: Keep scheduled jobs independent from their runner](ADR-0008-durable-scheduler-and-hosted-runner.md)
+- [ADR-0009: Research selected companies, not historical index membership](ADR-0009-company-selection-not-index-replication.md)
+- [ADR-0010: Model the Tata Motors demerger across its two securities](ADR-0010-tata-motors-demerger-and-security-identity.md)
+- [ADR-0011: Store NSE-reported market-cap snapshots](ADR-0011-nse-market-cap-snapshots.md)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -18,6 +20,7 @@ from nse_strategy_lab.services.prices import (
     query_corporate_actions,
 )
 from nse_strategy_lab.services.adjustments import point_in_time_signals
+from nse_strategy_lab.services.market_cap import query_market_cap_history
 from nse_strategy_lab.services.scheduler import LocalScheduler
 from nse_strategy_lab.services.scheduled_refresh import build_refresh_handlers
 from nse_strategy_lab.strategies import STRATEGIES
@@ -61,6 +64,32 @@ def load_chart_prices(
     return query_price_history(symbol, start, end, basis=basis, data_dir=DATA_DIR)
 
 
+@st.cache_data(ttl=300, max_entries=32)
+def load_chart_market_cap(
+    symbol: str,
+    snapshot_marker: tuple[tuple[str, int, int], ...],
+) -> pd.DataFrame:
+    # The marker changes when a new or updated snapshot file is imported.
+    del snapshot_marker
+    return query_market_cap_history(symbol, data_dir=DATA_DIR)
+
+
+def market_cap_snapshot_marker() -> tuple[tuple[str, int, int], ...]:
+    snapshot_dir = DATA_DIR / "curated" / "market_cap_observations"
+    if not snapshot_dir.exists():
+        return ()
+    return tuple(
+        sorted(
+            (
+                str(path.relative_to(snapshot_dir)),
+                path.stat().st_mtime_ns,
+                path.stat().st_size,
+            )
+            for path in snapshot_dir.rglob("*.parquet")
+        )
+    )
+
+
 def show_price_explorer() -> None:
     st.header("Price explorer")
     st.caption("Daily NSE cash-market prices from locally imported bhavcopy files")
@@ -87,13 +116,35 @@ def show_price_explorer() -> None:
             index=0,
         )
         basis = "adjusted" if basis_label == "Corporate-action adjusted" else "raw"
-        range_name = st.selectbox("Date range", ["1M", "6M", "1Y", "5Y", "All", "Custom"], index=3)
+
+    with st.container(border=True):
+        range_column, series_column = st.columns([2.6, 1.4], vertical_alignment="center")
+        with range_column:
+            range_name = st.segmented_control(
+                "Date range",
+                ["1M", "6M", "1Y", "5Y", "All", "Custom"],
+                default="5Y",
+                key="price_chart_range",
+                width="stretch",
+            )
+        with series_column:
+            selected_series = st.pills(
+                "Show",
+                ["Price", "Volume"],
+                selection_mode="multi",
+                default=["Price", "Volume"],
+                key="price_chart_series",
+                width="stretch",
+            )
+        show_price = "Price" in (selected_series or [])
+        show_volume = "Volume" in (selected_series or [])
 
         if range_name == "Custom":
             selected_range = st.date_input(
-                "Custom range",
+                "Custom date range",
                 value=(max(date(1900, 1, 1), latest_date - timedelta(days=365)), latest_date),
                 max_value=latest_date,
+                key="price_chart_custom_range",
             )
         else:
             days = {"1M": 31, "6M": 183, "1Y": 365, "5Y": 365 * 5}.get(range_name)
@@ -147,14 +198,187 @@ def show_price_explorer() -> None:
     if basis == "adjusted":
         st.caption(
             f"Corporate-action adjusted to {end_date.isoformat()} using {action_count} "
-            "recorded event(s). Raw NSE values remain available in the table. "
+            "recorded event(s). Source tickers remain available in the table. "
             "52-week extrema use the adjusted price basis."
         )
     else:
         st.caption(
             "Raw exchange-reported OHLCV. Corporate actions are not adjusted; "
-            "52-week extrema may be distorted across bonus or split dates."
+            "52-week extrema may be distorted across corporate-action dates."
         )
+    has_demerger = (
+        not action_records.empty
+        and action_records["action_type"].eq("demerger").any()
+    )
+    if symbol == "TMPV" and has_demerger:
+        st.info(
+            "This company history joins pre-change TATAMOTORS rows to TMPV. "
+            "Adjusted prices restate the pre-demerger series to the surviving "
+            "company's exchange reference price. TMCV is a separate company "
+            "and is not included in this chart. Raw NSE prices are retained in "
+            "the raw columns and source_symbol field."
+        )
+    price_label = "Adjusted close" if basis == "adjusted" else "Raw close"
+    if show_price or show_volume:
+        chart_base = alt.Chart(prices)
+        layers = []
+        if show_volume:
+            layers.append(
+                chart_base.mark_bar(color="#94a3b8", opacity=0.35).encode(
+                    x=alt.X("trade_date:T", title=None),
+                    y=alt.Y(
+                        "volume:Q",
+                        title="Volume (shares)",
+                        axis=alt.Axis(orient="right"),
+                        scale=alt.Scale(zero=True),
+                    ),
+                )
+            )
+        if show_price:
+            layers.append(
+                chart_base.mark_line(color="#2563eb", strokeWidth=2).encode(
+                    x=alt.X("trade_date:T", title=None),
+                    y=alt.Y(
+                        "close:Q",
+                        title=f"{price_label} (₹)",
+                        scale=alt.Scale(zero=False),
+                    ),
+                )
+            )
+
+        nearest = alt.selection_point(
+            name="nearest_session",
+            nearest=True,
+            on="pointermove",
+            fields=["trade_date"],
+            empty=False,
+        )
+        selectors = (
+            chart_base.mark_point(opacity=0, size=100)
+            .encode(
+                x=alt.X("trade_date:T", title=None),
+                y=alt.Y(
+                    "close:Q",
+                    axis=alt.Axis(title=None, labels=False, ticks=False, domain=False),
+                    scale=alt.Scale(zero=False),
+                ),
+                tooltip=[
+                    alt.Tooltip("trade_date:T", title="Date", format="%d %b %Y"),
+                    alt.Tooltip("close:Q", title=f"{price_label} (₹)", format=",.2f"),
+                    alt.Tooltip("volume:Q", title="Volume (shares)", format=",.0f"),
+                ],
+            )
+            .add_params(nearest)
+        )
+        cursor = (
+            chart_base.mark_rule(color="#64748b", strokeWidth=1)
+            .encode(
+                x=alt.X("trade_date:T"),
+                tooltip=[
+                    alt.Tooltip("trade_date:T", title="Date", format="%d %b %Y"),
+                    alt.Tooltip("close:Q", title=f"{price_label} (₹)", format=",.2f"),
+                    alt.Tooltip("volume:Q", title="Volume (shares)", format=",.0f"),
+                ],
+            )
+            .transform_filter(nearest)
+        )
+        if show_price:
+            selected_price = (
+                chart_base.mark_point(
+                    filled=True,
+                    size=72,
+                    color="#2563eb",
+                    stroke="white",
+                    strokeWidth=1.5,
+                )
+                .encode(
+                    x=alt.X("trade_date:T"),
+                    y=alt.Y("close:Q", scale=alt.Scale(zero=False)),
+                )
+                .transform_filter(nearest)
+            )
+            layers.append(selected_price)
+        chart = (
+            alt.layer(*layers, selectors, cursor)
+            .resolve_scale(y="independent")
+            .properties(height=420)
+        )
+        st.altair_chart(
+            chart,
+            width="stretch",
+            alt=f"Daily {basis_label.lower()} closing price and share volume for {symbol}",
+        )
+    else:
+        st.info("Select Price, Volume, or both to display the chart.")
+
+    with st.container(border=True):
+        st.subheader("Market cap")
+        st.caption("NSE-reported market-cap observations · ₹ crore")
+        market_caps = load_chart_market_cap(
+            symbol, market_cap_snapshot_marker()
+        )
+        if market_caps.empty:
+            st.info(
+                f"No NSE-reported market-cap observations are stored for {symbol} "
+                "yet."
+            )
+            st.link_button(
+                "Open NSE company quote",
+                f"https://www.nseindia.com/get-quotes/equity?symbol={quote(symbol)}",
+            )
+        else:
+            latest_market_cap = market_caps.iloc[-1]
+            if latest_market_cap["observation_type"] == "average_period":
+                metric_label = "NSE reported average market cap"
+                period_label = (
+                    f"Average for {latest_market_cap['period_start']:%d %b %Y} to "
+                    f"{latest_market_cap['period_end']:%d %b %Y}"
+                )
+                chart_title = "Average market cap (₹ crore)"
+            else:
+                metric_label = "NSE reported total market cap"
+                period_label = f"Snapshot as of {latest_market_cap['as_of_date']:%d %b %Y}"
+                chart_title = "Total market cap (₹ crore)"
+            st.metric(
+                metric_label,
+                f"₹{latest_market_cap['market_cap_inr_crore']:,.2f} Cr",
+                border=True,
+            )
+            st.caption(
+                f"{period_label} · {len(market_caps)} stored observation(s)"
+            )
+            if latest_market_cap["source_url"]:
+                st.link_button("View NSE source", latest_market_cap["source_url"])
+            market_cap_chart = (
+                alt.Chart(market_caps)
+                .mark_line(point=True, color="#0f766e", strokeWidth=2)
+                .encode(
+                    x=alt.X("chart_date:T", title=None),
+                    y=alt.Y(
+                        "market_cap_inr_crore:Q",
+                        title=chart_title,
+                        scale=alt.Scale(zero=False),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("observation_type:N", title="Measure"),
+                        alt.Tooltip("period_start:T", title="Period start", format="%d %b %Y"),
+                        alt.Tooltip("period_end:T", title="Period end", format="%d %b %Y"),
+                        alt.Tooltip("as_of_date:T", title="As of", format="%d %b %Y"),
+                        alt.Tooltip(
+                            "market_cap_inr_crore:Q",
+                            title=chart_title,
+                            format=",.2f",
+                        ),
+                    ],
+                )
+                .properties(height=260)
+            )
+            st.altair_chart(
+                market_cap_chart,
+                width="stretch",
+                alt=f"NSE-reported market-cap observations for {symbol}",
+            )
+
     with st.container(horizontal=True):
         st.metric("Latest imported session", latest_date.isoformat(), border=True)
         st.metric("Sessions in view", f"{len(prices):,}", border=True)
@@ -162,26 +386,7 @@ def show_price_explorer() -> None:
         st.metric("52-week high at range end", f"₹{float(prices['high_52w'].iloc[-1]):,.2f}", border=True)
         st.metric("52-week low at range end", f"₹{float(prices['low_52w'].iloc[-1]):,.2f}", border=True)
 
-    with st.container(border=True):
-        price_label = "Adjusted close" if basis == "adjusted" else "Raw close"
-        st.subheader(f"{symbol} {price_label.lower()}")
-        st.line_chart(
-            prices,
-            x="trade_date",
-            y="close",
-            alt=f"Daily {basis_label.lower()} closing price for {symbol}",
-        )
-
-    with st.container(border=True):
-        st.subheader("Traded volume")
-        st.bar_chart(
-            prices,
-            x="trade_date",
-            y="volume",
-            alt=f"Daily {basis_label.lower()} share volume for {symbol}",
-        )
-
-    visible_columns = ["trade_date", "symbol", "series"]
+    visible_columns = ["trade_date", "symbol", "source_symbol", "series"]
     if basis == "adjusted":
         visible_columns.extend(
             [

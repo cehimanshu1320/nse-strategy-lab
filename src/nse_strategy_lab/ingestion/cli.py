@@ -13,6 +13,10 @@ from nse_strategy_lab.ingestion.jobs.corporate_action_import import (
     stage_action_inbox,
     stage_nse_action_export,
 )
+from nse_strategy_lab.ingestion.jobs.market_cap_import import (
+    NSE_MARKET_CAP_WORKBOOK_URL,
+    import_nse_market_cap_workbook,
+)
 from nse_strategy_lab.ingestion.parsers.corporate_actions import NSE_ACTIONS_URL
 from nse_strategy_lab.services.refresh import (
     five_years_before,
@@ -140,7 +144,29 @@ def main() -> None:
     )
     action_refresh.add_argument("--data-dir", type=Path, default=Path("data"))
 
+    market_cap = subparsers.add_parser(
+        "import-market-cap",
+        help="archive and import an NSE all-company market-cap workbook",
+    )
+    market_cap.add_argument("workbook", type=Path, help="downloaded NSE XLSX workbook")
+    market_cap.add_argument("--source-url", default=NSE_MARKET_CAP_WORKBOOK_URL)
+    market_cap.add_argument("--data-dir", type=Path, default=Path("data"))
+
     args = parser.parse_args()
+    if args.command == "import-market-cap":
+        result = import_nse_market_cap_workbook(
+            args.workbook,
+            data_dir=args.data_dir,
+            source_url=args.source_url,
+        )
+        print(
+            f"Imported {result['rows_written']:,} NSE average market-cap observations "
+            f"for {result['period_start']} to {result['period_end']}"
+        )
+        print(f"Excluded {result['not_traded_rows']:,} companies marked not traded in the source")
+        print(f"Archived raw source: {result['raw_path']}")
+        return
+
     if args.command == "status":
         store = LocalPriceStore(args.data_dir)
         print(f"Latest imported session: {store.latest_trade_date() or 'none'}")

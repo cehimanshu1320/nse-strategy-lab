@@ -10,6 +10,7 @@ from nse_strategy_lab.domain.corporate_actions import (
     SHARE_ACTIONS,
     validate_corporate_actions,
 )
+from nse_strategy_lab.domain.instruments import attach_instrument_identity
 
 
 PRICE_FIELDS = ("open", "high", "low", "close")
@@ -58,7 +59,7 @@ def adjust_price_history(
     # For multiple same-day events, apply share-basis changes before cash
     # distributions so the dividend amount is interpreted per ex-date share.
     eligible["_action_order"] = eligible["action_type"].map(
-        {"bonus": 0, "split": 0, "dividend": 1}
+        {"bonus": 0, "split": 0, "demerger": 1, "dividend": 2}
     )
     eligible = eligible.sort_values(["ex_date", "_action_order"])
     for action in eligible.itertuples(index=False):
@@ -89,6 +90,26 @@ def adjust_price_history(
             result.loc[mask, [f"{field}_adjusted" for field in PRICE_FIELDS]] *= (
                 adjustment_factor
             )
+        elif action.action_type == "demerger" and mask.any():
+            prior = result[
+                (result["symbol"] == action.symbol)
+                & (result["series"] == action.series)
+                & (result[date_column] < action.ex_date)
+            ].sort_values(date_column)
+            if prior.empty:
+                raise ValueError(
+                    f"Demerger on {action.symbol} at {action.ex_date} has no prior price."
+                )
+            prior_close = float(prior.iloc[-1]["close_adjusted"])
+            adjustment_factor = float(action.surviving_reference_price) / prior_close
+            if adjustment_factor <= 0:
+                raise ValueError(
+                    f"Demerger on {action.symbol} at {action.ex_date} has an invalid "
+                    "surviving-company price factor."
+                )
+            result.loc[mask, [f"{field}_adjusted" for field in PRICE_FIELDS]] *= (
+                adjustment_factor
+            )
 
     return result
 
@@ -100,14 +121,26 @@ def strategy_bars_from_adjusted(adjusted: pd.DataFrame) -> pd.DataFrame:
         result[field] = result[f"{field}_adjusted"]
     if "volume_adjusted" in result:
         result["volume"] = result["volume_adjusted"]
+    return add_52_week_extrema(result)
+
+
+def add_52_week_extrema(
+    bars: pd.DataFrame,
+    *,
+    high_column: str = "high",
+    low_column: str = "low",
+) -> pd.DataFrame:
+    """Compute calendar-time extrema by stable instrument when available."""
+    result = bars.copy()
     date_column = "date" if "date" in result else "trade_date"
+    group_column = "instrument_id" if "instrument_id" in result else "symbol"
     result["high_52w"] = float("nan")
     result["low_52w"] = float("nan")
-    for _, indexes in result.groupby("symbol", sort=False).groups.items():
+    for _, indexes in result.groupby(group_column, sort=False).groups.items():
         group = result.loc[indexes].sort_values(date_column)
         dates = pd.DatetimeIndex(pd.to_datetime(group[date_column]))
-        highs = pd.Series(group["high"].to_numpy(), index=dates)
-        lows = pd.Series(group["low"].to_numpy(), index=dates)
+        highs = pd.Series(group[high_column].astype(float).to_numpy(), index=dates)
+        lows = pd.Series(group[low_column].astype(float).to_numpy(), index=dates)
         result.loc[group.index, "high_52w"] = highs.rolling("364D", closed="both").max().to_numpy()
         result.loc[group.index, "low_52w"] = lows.rolling("364D", closed="both").min().to_numpy()
     return result
@@ -129,6 +162,9 @@ def point_in_time_signals(strategy, raw_bars: pd.DataFrame, actions: pd.DataFram
     for decision_date in sorted(ordered[date_column].unique()):
         prefix = ordered[ordered[date_column] <= decision_date]
         adjusted = adjust_price_history(prefix, actions, as_of_date=decision_date)
+        adjusted = attach_instrument_identity(
+            adjusted, date_column=date_column, canonical_symbol=True
+        )
         strategy_input = strategy_bars_from_adjusted(adjusted)
         signals = strategy(strategy_input)
         current = signals[pd.to_datetime(signals["date"]).dt.date == decision_date]

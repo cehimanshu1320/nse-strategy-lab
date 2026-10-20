@@ -2,6 +2,7 @@
 
 - Status: accepted for the prototype
 - Date: 2026-10-13
+- Scope amended: 2026-10-18 to retain BE alongside EQ
 - Owners: project
 
 ## Context
@@ -25,6 +26,11 @@ interpretation, not a legal determination.
 - Keep the downloader in an explicit CLI job, never in Streamlit page rendering.
 - Save original ZIP files, checksums, retrieval metadata, normalized prices,
   and import results locally.
+- Retain `EQ` and `BE` cash-equity series from CM bhavcopies. `BE` rows are
+  needed to capture a security's early trading history when NSE lists it in
+  trade-to-trade before moving it to `EQ` (for example, JIOFIN in 2023).
+  Exclude non-cash-equity series and preserve the source `series` value in the
+  canonical key; do not coalesce rows across series.
 - Revisit the data source before the project moves beyond the prototype.
 
 ## Consequences

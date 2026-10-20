@@ -43,7 +43,8 @@ def import_bhavcopy_range(
     data_dir: Path | str = Path("data"),
     symbols: set[str] | None = None,
     progress=print,
-) -> dict[str, int | str]:
+    stop_on_error: bool = False,
+) -> dict[str, object]:
     if start > end:
         raise ValueError("Start date must be on or before end date")
 
@@ -51,6 +52,8 @@ def import_bhavcopy_range(
     client = NseBhavcopyClient()
     run_id = store.start_run(start, end)
     downloaded = skipped = rows_written = 0
+    no_report_dates: list[str] = []
+    failed_dates: list[str] = []
     failures: list[str] = []
 
     try:
@@ -61,6 +64,7 @@ def import_bhavcopy_range(
                     report = client.download(trade_date)
                     if report is None:
                         skipped += 1
+                        no_report_dates.append(trade_date.isoformat())
                         progress(f"{trade_date}: no bhavcopy (holiday or unavailable)")
                         continue
 
@@ -70,16 +74,19 @@ def import_bhavcopy_range(
                 else:
                     skipped += 1
                 source_format = "udiff" if trade_date >= date(2024, 7, 8) else "legacy"
-                store.record_source(report, raw_path, checksum, source_format)
                 prices = parse_bhavcopy(report.content, trade_date, checksum)
                 if symbols:
                     prices = prices[prices["symbol"].isin({item.upper() for item in symbols})]
+                store.record_source(report, raw_path, checksum, source_format)
                 row_count = store.upsert_prices(prices)
                 rows_written += row_count
                 progress(f"{trade_date}: imported {row_count:,} rows ({source_format})")
             except Exception as exc:
                 failures.append(f"{trade_date}: {type(exc).__name__}: {exc}")
+                failed_dates.append(trade_date.isoformat())
                 progress(f"{trade_date}: ERROR {exc}")
+                if stop_on_error:
+                    break
     finally:
         store.finish_run(
             run_id,
@@ -96,4 +103,6 @@ def import_bhavcopy_range(
         "files_skipped": skipped,
         "rows_written": rows_written,
         "errors": len(failures),
+        "failed_dates": failed_dates,
+        "no_report_dates": no_report_dates,
     }

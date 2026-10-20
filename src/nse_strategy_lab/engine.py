@@ -9,6 +9,11 @@ from nse_strategy_lab.domain.corporate_actions import (
     SHARE_ACTIONS,
     validate_corporate_actions,
 )
+from nse_strategy_lab.domain.instruments import (
+    attach_instrument_identity,
+    current_symbol_for_instrument,
+    instrument_id_for,
+)
 
 
 REQUIRED_BAR_COLUMNS = {"date", "symbol", "open", "close"}
@@ -64,37 +69,44 @@ def run_backtest(
 
     ordered_bars = bars.copy()
     ordered_bars["date"] = pd.to_datetime(ordered_bars["date"], errors="raise")
-    ordered_bars = ordered_bars.sort_values(["date", "symbol"])
+    ordered_bars = attach_instrument_identity(
+        ordered_bars, date_column="date", canonical_symbol=True
+    ).sort_values(["date", "instrument_id"])
+    if ordered_bars.duplicated(["date", "instrument_id"]).any():
+        raise ValueError("Price data has duplicate date/instrument rows after symbol mapping.")
     actions = validate_corporate_actions(
         corporate_actions if corporate_actions is not None else pd.DataFrame()
     )
     ordered_signals = signals.copy()
     ordered_signals["date"] = pd.to_datetime(ordered_signals["date"], errors="raise")
-    if ordered_signals.duplicated(["date", "symbol"]).any():
-        raise ValueError("Signals have duplicate date/symbol rows.")
+    ordered_signals = attach_instrument_identity(
+        ordered_signals, date_column="date", canonical_symbol=True
+    )
+    if ordered_signals.duplicated(["date", "instrument_id"]).any():
+        raise ValueError("Signals have duplicate date/instrument rows after symbol mapping.")
 
     # Schedule each signal on the next available bar for that symbol. This is
     # robust to symbols with occasional missing sessions in the imported data.
-    scheduled_signals = ordered_bars[["date", "symbol"]].merge(
-        ordered_signals[["date", "symbol", "entry", "exit"]],
-        on=["date", "symbol"],
+    scheduled_signals = ordered_bars[["date", "instrument_id"]].merge(
+        ordered_signals[["date", "instrument_id", "entry", "exit"]],
+        on=["date", "instrument_id"],
         how="left",
     )
     scheduled_signals[["entry", "exit"]] = scheduled_signals[["entry", "exit"]].fillna(False)
-    scheduled_signals[["entry", "exit"]] = scheduled_signals.groupby("symbol", sort=False)[
+    scheduled_signals[["entry", "exit"]] = scheduled_signals.groupby("instrument_id", sort=False)[
         ["entry", "exit"]
     ].shift(1).fillna(False)
-    signal_map = scheduled_signals.set_index(["date", "symbol"])[["entry", "exit"]]
+    signal_map = scheduled_signals.set_index(["date", "instrument_id"])[["entry", "exit"]]
     sessions = list(ordered_bars.groupby("date", sort=True))
     cash = float(config.initial_cash)
-    positions: dict[str, dict[str, float | pd.Timestamp]] = {}
+    positions: dict[str, dict[str, float | pd.Timestamp | str]] = {}
     dividend_receivables: list[dict[str, object]] = []
     completed_trades: list[dict[str, object]] = []
     daily_records: list[dict[str, object]] = []
     slippage = config.slippage_bps / 10_000
 
     for session_index, (date, session_bars) in enumerate(sessions):
-        prices = session_bars.set_index("symbol")
+        prices = session_bars.set_index("instrument_id")
         todays_signals = signal_map.xs(date, level="date")
 
         session_date = date.date()
@@ -110,11 +122,12 @@ def run_backtest(
         # A dividend entitlement belongs to positions held through the prior
         # close. It remains a receivable until the stated payment date.
         for action in todays_actions[todays_actions["action_type"] == "dividend"].itertuples(index=False):
-            position = positions.get(action.symbol)
+            parent_id = instrument_id_for(action.symbol, action.ex_date)
+            position = positions.get(parent_id)
             if position is not None:
                 dividend_receivables.append(
                     {
-                        "symbol": action.symbol,
+                        "symbol": position["symbol"],
                         "ex_date": action.ex_date,
                         "pay_date": action.pay_date,
                         "amount": float(position["quantity"]) * float(action.cash_per_share),
@@ -124,7 +137,8 @@ def run_backtest(
         # Apply split/bonus share multipliers before ex-date open fills. Existing
         # holders keep their total cost basis; only per-share basis changes.
         for action in todays_actions[todays_actions["action_type"].isin(SHARE_ACTIONS)].itertuples(index=False):
-            position = positions.get(action.symbol)
+            parent_id = instrument_id_for(action.symbol, action.ex_date)
+            position = positions.get(parent_id)
             if position is None:
                 continue
             factor = float(action.share_factor)
@@ -133,21 +147,66 @@ def run_backtest(
             if "last_close" in position:
                 position["last_close"] = float(position["last_close"]) / factor
 
+        # A demerger distributes a separately tradable security to every holder
+        # of the parent through the prior close. Split original entry cost basis
+        # across the two post-event securities using their exchange reference
+        # values; seed the child mark until its first market quote is available.
+        for action in todays_actions[todays_actions["action_type"] == "demerger"].itertuples(index=False):
+            parent_id = instrument_id_for(action.symbol, action.ex_date)
+            position = positions.get(parent_id)
+            if position is None:
+                continue
+            child_id = instrument_id_for(action.distributed_symbol, action.ex_date)
+            ratio = float(action.distribution_ratio)
+            surviving_value = float(action.surviving_reference_price)
+            child_value = ratio * float(action.distributed_reference_price)
+            total_reference_value = surviving_value + child_value
+            surviving_weight = surviving_value / total_reference_value
+            child_weight = child_value / total_reference_value
+            original_quantity = float(position["quantity"])
+            original_entry_price = float(position["entry_price"])
+            original_entry_cost = float(position["entry_cost"])
+
+            position["entry_price"] = original_entry_price * surviving_weight
+            position["entry_cost"] = original_entry_cost * surviving_weight
+            position["last_close"] = surviving_value
+            position["symbol"] = current_symbol_for_instrument(parent_id)
+
+            child_entry_cost = original_entry_cost * child_weight
+            child_position = {
+                "quantity": original_quantity * ratio,
+                "entry_date": position["entry_date"],
+                "entry_price": original_entry_price * child_weight / ratio,
+                "entry_cost": child_entry_cost,
+                "symbol": action.distributed_symbol,
+                "last_close": float(action.distributed_reference_price),
+            }
+            if child_id in positions:
+                existing_child = positions[child_id]
+                combined_cost = float(existing_child["entry_cost"]) + child_entry_cost
+                combined_quantity = float(existing_child["quantity"]) + original_quantity * ratio
+                existing_child["entry_price"] = combined_cost / combined_quantity
+                existing_child["entry_cost"] = combined_cost
+                existing_child["quantity"] = combined_quantity
+            else:
+                positions[child_id] = child_position
+
         # Exit first so realized cash is available for entries on the same open.
-        for symbol in list(positions):
-            if symbol not in prices.index or symbol not in todays_signals.index:
+        for instrument_id in list(positions):
+            if instrument_id not in prices.index or instrument_id not in todays_signals.index:
                 continue
-            if not bool(todays_signals.at[symbol, "exit"]):
+            if not bool(todays_signals.at[instrument_id, "exit"]):
                 continue
-            position = positions.pop(symbol)
-            fill = float(prices.at[symbol, "open"]) * (1 - slippage)
+            position = positions.pop(instrument_id)
+            fill = float(prices.at[instrument_id, "open"]) * (1 - slippage)
             quantity = float(position["quantity"])
             gross = quantity * fill
             fee = gross * config.fee_rate
             cash += gross - fee
             completed_trades.append(
                 {
-                    "symbol": symbol,
+                    "symbol": current_symbol_for_instrument(instrument_id),
+                    "instrument_id": instrument_id,
                     "entry_date": position["entry_date"],
                     "exit_date": date,
                     "entry_price": position["entry_price"],
@@ -160,16 +219,16 @@ def run_backtest(
             )
 
         candidates = []
-        for symbol in prices.index:
-            if symbol in positions or symbol not in todays_signals.index:
+        for instrument_id in prices.index:
+            if instrument_id in positions or instrument_id not in todays_signals.index:
                 continue
-            if bool(todays_signals.at[symbol, "entry"]):
-                candidates.append(symbol)
+            if bool(todays_signals.at[instrument_id, "entry"]):
+                candidates.append(instrument_id)
 
         if candidates and cash > 0:
             allocation = cash / len(candidates)
-            for symbol in candidates:
-                fill = float(prices.at[symbol, "open"]) * (1 + slippage)
+            for instrument_id in candidates:
+                fill = float(prices.at[instrument_id, "open"]) * (1 + slippage)
                 quantity = int(allocation / (fill * (1 + config.fee_rate)))
                 if quantity <= 0:
                     continue
@@ -179,17 +238,19 @@ def run_backtest(
                 if total_cost > cash:
                     continue
                 cash -= total_cost
-                positions[symbol] = {
+                positions[instrument_id] = {
                     "quantity": quantity,
                     "entry_date": date,
                     "entry_price": fill,
                     "entry_cost": total_cost,
+                    "symbol": current_symbol_for_instrument(instrument_id),
                 }
 
         market_value = 0.0
-        for symbol, position in positions.items():
-            if symbol in prices.index:
-                position["last_close"] = float(prices.at[symbol, "close"])
+        for instrument_id, position in positions.items():
+            if instrument_id in prices.index:
+                position["last_close"] = float(prices.at[instrument_id, "close"])
+                position["symbol"] = current_symbol_for_instrument(instrument_id)
             if "last_close" in position:
                 market_value += float(position["quantity"]) * float(position["last_close"])
         receivable_value = sum(float(item["amount"]) for item in dividend_receivables)
@@ -207,16 +268,18 @@ def run_backtest(
     trades = pd.DataFrame(completed_trades)
     open_rows = []
     if sessions:
-        for symbol, position in positions.items():
+        for instrument_id, position in positions.items():
             last_close = float(position.get("last_close", np.nan))
             quantity = float(position["quantity"])
             open_rows.append(
                 {
-                    "symbol": symbol,
+                    "symbol": position["symbol"],
+                    "instrument_id": instrument_id,
                     "entry_date": position["entry_date"],
                     "entry_price": position["entry_price"],
                     "quantity": quantity,
                     "last_close": last_close,
+                    "entry_cost": float(position["entry_cost"]),
                     "unrealized_pnl": quantity * (last_close - float(position["entry_price"]))
                     if pd.notna(last_close)
                     else np.nan,

@@ -25,9 +25,9 @@ Indian equities without creating a general-purpose public trading platform.
 
 - Strategy code stays inspectable and versionable in Git.
 - Shared-cash results account for competing entries and constrained capital.
-- A current Nifty 50 watchlist is suitable for charting and prototyping, but
-  point-in-time index membership is required for unbiased historical index
-  universe backtests.
+- The captured Nifty 50 roster is the initial set of companies to research.
+  Strategies operate on explicitly selected companies; they do not claim to
+  recreate the Nifty 50 index portfolio or its historical membership.
 - Costs/slippage and fill semantics must be stored with every research run.
 
 ## Alternatives considered

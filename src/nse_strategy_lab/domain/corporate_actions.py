@@ -12,6 +12,11 @@ ACTION_COLUMNS = [
     "share_factor",
     "cash_per_share",
     "pay_date",
+    "distributed_symbol",
+    "distributed_series",
+    "distribution_ratio",
+    "surviving_reference_price",
+    "distributed_reference_price",
     "terms",
     "source_url",
     "source_file_id",
@@ -19,7 +24,8 @@ ACTION_COLUMNS = [
 
 ACTION_KEY = ["symbol", "series", "action_type", "ex_date"]
 SHARE_ACTIONS = {"bonus", "split"}
-SUPPORTED_ACTIONS = SHARE_ACTIONS | {"dividend"}
+DEMERGER_ACTIONS = {"demerger"}
+SUPPORTED_ACTIONS = SHARE_ACTIONS | {"dividend"} | DEMERGER_ACTIONS
 
 
 def validate_corporate_actions(actions):
@@ -72,6 +78,16 @@ def validate_corporate_actions(actions):
 
     result["share_factor"] = pd.to_numeric(result["share_factor"], errors="coerce")
     result["cash_per_share"] = pd.to_numeric(result["cash_per_share"], errors="coerce")
+    for column in (
+        "distribution_ratio",
+        "surviving_reference_price",
+        "distributed_reference_price",
+    ):
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    for column in ("distributed_symbol", "distributed_series"):
+        result[column] = result[column].map(
+            lambda value: value.strip().upper() if isinstance(value, str) and value.strip() else None
+        )
     for _, action in result.iterrows():
         if action["action_type"] in SHARE_ACTIONS:
             if pd.isna(action["share_factor"]) or action["share_factor"] <= 0:
@@ -83,6 +99,18 @@ def validate_corporate_actions(actions):
                 raise ValueError("Dividend actions require a pay_date for portfolio accounting.")
             if action["pay_date"] < action["ex_date"]:
                 raise ValueError("Dividend pay_date cannot precede its ex_date.")
+        elif action["action_type"] == "demerger":
+            if not action["distributed_symbol"] or not action["distributed_series"]:
+                raise ValueError(
+                    "Demerger actions require distributed_symbol and distributed_series."
+                )
+            if action["distributed_symbol"] == action["symbol"]:
+                raise ValueError("A demerger must distribute a separate security.")
+            if pd.isna(action["distribution_ratio"]) or action["distribution_ratio"] <= 0:
+                raise ValueError("Demerger actions require a positive distribution_ratio.")
+            for column in ("surviving_reference_price", "distributed_reference_price"):
+                if pd.isna(action[column]) or action[column] <= 0:
+                    raise ValueError(f"Demerger actions require a positive {column}.")
 
     if result.duplicated(ACTION_KEY).any():
         raise ValueError("Corporate actions contain duplicate natural keys.")
